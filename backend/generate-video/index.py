@@ -1,30 +1,41 @@
 import json
 import os
-import time
+import uuid
 import base64
-import hashlib
-import hmac
 import requests
+import boto3
 
 
-def _make_jwt(access_key: str, secret_key: str) -> str:
-    """Генерирует JWT токен для Kling AI API."""
-    header = base64.urlsafe_b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()).rstrip(b"=").decode()
-    now = int(time.time())
-    payload = base64.urlsafe_b64encode(json.dumps({
-        "iss": access_key,
-        "exp": now + 1800,
-        "nbf": now - 5
-    }).encode()).rstrip(b"=").decode()
-    sig_input = f"{header}.{payload}".encode()
-    sig = base64.urlsafe_b64encode(
-        hmac.new(secret_key.encode(), sig_input, hashlib.sha256).digest()
-    ).rstrip(b"=").decode()
-    return f"{header}.{payload}.{sig}"
+def _upload_image_to_s3(image_b64: str) -> str:
+    """Загружает base64-изображение в S3 и возвращает публичный CDN URL."""
+    if "," in image_b64:
+        header, image_b64 = image_b64.split(",", 1)
+        ext = "jpg"
+        if "png" in header:
+            ext = "png"
+        elif "webp" in header:
+            ext = "webp"
+    else:
+        ext = "jpg"
+
+    image_data = base64.b64decode(image_b64)
+    key = f"vidai-uploads/{uuid.uuid4()}.{ext}"
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url="https://bucket.poehali.dev",
+        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    )
+    content_type = f"image/{ext}"
+    s3.put_object(Bucket="files", Key=key, Body=image_data, ContentType=content_type)
+
+    cdn_url = f"https://cdn.poehali.dev/projects/{os.environ['AWS_ACCESS_KEY_ID']}/files/{key}"
+    return cdn_url
 
 
 def handler(event: dict, context) -> dict:
-    """Запускает генерацию видео из фото через Kling AI API."""
+    """Запускает генерацию видео из фото через PiAPI (Kling AI)."""
     if event.get("httpMethod") == "OPTIONS":
         return {
             "statusCode": 200,
@@ -51,27 +62,22 @@ def handler(event: dict, context) -> dict:
             "body": json.dumps({"error": "image_base64 is required"}),
         }
 
-    access_key = os.environ.get("KLING_ACCESS_KEY", "")
-    secret_key = os.environ.get("KLING_SECRET_KEY", "")
-
-    if not access_key or not secret_key:
+    api_key = os.environ.get("PIAPI_KEY", "")
+    if not api_key:
         return {
             "statusCode": 500,
             "headers": {"Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"error": "Kling API keys not configured"}),
+            "body": json.dumps({"error": "PIAPI_KEY not configured"}),
         }
 
-    token = _make_jwt(access_key, secret_key)
+    # Upload image to S3 to get a public URL
+    image_url = _upload_image_to_s3(image_b64)
 
-    ratio_map = {"16:9": "16:9", "9:16": "9:16", "1:1": "1:1", "4:3": "4:3"}
-    aspect_ratio = ratio_map.get(ratio, "16:9")
-
+    # Duration: PiAPI Kling accepts 5 or 10
     dur_seconds = int(str(duration).replace("s", ""))
-    if dur_seconds > 10:
-        dur_seconds = 10
-    elif dur_seconds < 5:
-        dur_seconds = 5
+    dur_seconds = 10 if dur_seconds > 10 else (5 if dur_seconds < 5 else dur_seconds)
 
+    # Style → prompt enrichment
     style_prompt_map = {
         "cinematic": "cinematic camera movement, film look",
         "anime": "anime style, smooth animation",
@@ -82,26 +88,31 @@ def handler(event: dict, context) -> dict:
     }
     full_prompt = f"{prompt}, {style_prompt_map[style]}" if style in style_prompt_map else prompt
 
-    if "," in image_b64:
-        image_b64 = image_b64.split(",", 1)[1]
-
     payload = {
-        "model_name": "kling-v1",
-        "image": image_b64,
-        "prompt": full_prompt,
-        "duration": str(dur_seconds),
-        "aspect_ratio": aspect_ratio,
-        "cfg_scale": 0.5,
+        "model": "kling",
+        "task_type": "video_generation",
+        "input": {
+            "image_url": image_url,
+            "prompt": full_prompt,
+            "negative_prompt": "blurry, distorted, low quality",
+            "duration": dur_seconds,
+            "aspect_ratio": ratio,
+            "version": "1.6",
+            "mode": "std",
+        },
     }
 
     resp = requests.post(
-        "https://api.klingai.com/v1/videos/image2video",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        "https://api.piapi.ai/api/v1/task",
+        headers={
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+        },
         json=payload,
         timeout=30,
     )
 
-    if resp.status_code != 200:
+    if resp.status_code not in (200, 201):
         return {
             "statusCode": resp.status_code,
             "headers": {"Access-Control-Allow-Origin": "*"},
