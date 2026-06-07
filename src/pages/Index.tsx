@@ -1,6 +1,9 @@
 import { useState, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 
+const GENERATE_URL = "https://functions.poehali.dev/5fc3e503-1a3c-4178-8e61-fd427ecb95d1";
+const STATUS_URL = "https://functions.poehali.dev/7d984b3f-e308-49c9-b362-6e69ddeee6e7";
+
 type Stage = "input" | "preview" | "generating" | "done";
 
 const STYLE_PRESETS = [
@@ -25,6 +28,8 @@ export default function Index() {
   const [isDragging, setIsDragging] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [genError, setGenError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = (files: FileList | null) => {
@@ -60,31 +65,82 @@ export default function Index() {
     setUploadedImages((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     setStage("generating");
     setProgress(0);
+    setGenError(null);
+    setVideoUrl(null);
 
-    const steps = [
-      { pct: 12, label: "АНАЛИЗ ИЗОБРАЖЕНИЙ..." },
-      { pct: 28, label: "ИЗВЛЕЧЕНИЕ КЛЮЧЕВЫХ КАДРОВ..." },
-      { pct: 45, label: "ПРИМЕНЕНИЕ СТИЛЯ..." },
-      { pct: 63, label: "ГЕНЕРАЦИЯ ДВИЖЕНИЯ..." },
-      { pct: 78, label: "РЕНДЕРИНГ ВИДЕО..." },
-      { pct: 91, label: "ФИНАЛЬНАЯ ОБРАБОТКА..." },
-      { pct: 100, label: "ЗАВЕРШЕНО" },
+    const progressSteps = [
+      { pct: 10, label: "ОТПРАВКА ИЗОБРАЖЕНИЯ..." },
+      { pct: 25, label: "ЗАПУСК ГЕНЕРАЦИИ..." },
+      { pct: 40, label: "ИИ АНАЛИЗИРУЕТ КАДРЫ..." },
+      { pct: 55, label: "ГЕНЕРАЦИЯ ДВИЖЕНИЯ..." },
+      { pct: 70, label: "РЕНДЕРИНГ ВИДЕО..." },
+      { pct: 85, label: "ФИНАЛЬНАЯ ОБРАБОТКА..." },
     ];
 
-    let i = 0;
-    const interval = setInterval(() => {
-      if (i >= steps.length) {
-        clearInterval(interval);
-        setTimeout(() => setStage("done"), 300);
-        return;
+    // Animate progress while waiting
+    let stepIdx = 0;
+    const progressInterval = setInterval(() => {
+      if (stepIdx < progressSteps.length) {
+        setProgress(progressSteps[stepIdx].pct);
+        setProgressLabel(progressSteps[stepIdx].label);
+        stepIdx++;
       }
-      setProgress(steps[i].pct);
-      setProgressLabel(steps[i].label);
-      i++;
-    }, 800);
+    }, 3000);
+
+    try {
+      // Step 1: Start generation
+      const genResp = await fetch(GENERATE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image_base64: uploadedImages[0],
+          prompt,
+          duration,
+          style,
+          ratio,
+        }),
+      });
+
+      const genData = await genResp.json();
+
+      if (!genResp.ok || !genData.task_id) {
+        throw new Error(genData.error || "Ошибка запуска генерации");
+      }
+
+      const taskId = genData.task_id;
+
+      // Step 2: Poll for result (max 5 min)
+      const maxAttempts = 60;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        await new Promise((r) => setTimeout(r, 5000));
+
+        const statusResp = await fetch(`${STATUS_URL}?task_id=${taskId}`);
+        const statusData = await statusResp.json();
+
+        if (statusData.status === "succeed" && statusData.video_url) {
+          clearInterval(progressInterval);
+          setProgress(100);
+          setProgressLabel("ЗАВЕРШЕНО");
+          setVideoUrl(statusData.video_url);
+          setTimeout(() => setStage("done"), 600);
+          return;
+        }
+
+        if (statusData.status === "failed") {
+          throw new Error("Генерация не удалась. Попробуй ещё раз.");
+        }
+      }
+
+      throw new Error("Превышено время ожидания. Попробуй ещё раз.");
+    } catch (err: unknown) {
+      clearInterval(progressInterval);
+      const msg = err instanceof Error ? err.message : "Неизвестная ошибка";
+      setGenError(msg);
+      setStage("input");
+    }
   };
 
   const handleReset = () => {
@@ -93,9 +149,14 @@ export default function Index() {
     setPrompt("");
     setProgress(0);
     setProgressLabel("");
+    setVideoUrl(null);
+    setGenError(null);
   };
 
   const canProceed = uploadedImages.length > 0 && prompt.trim().length > 0;
+
+  // Find the done-stage video src
+  const resultVideoSrc = videoUrl ?? undefined;
 
   return (
     <div className="min-h-screen bg-background grid-bg relative overflow-hidden">
@@ -336,6 +397,12 @@ export default function Index() {
                       {uploadedImages.length === 0 ? "⚡ Загрузи хотя бы 1 фото" : "⚡ Введи описание"}
                     </p>
                   )}
+                  {genError && (
+                    <div className="border border-red-500/40 bg-red-500/10 px-3 py-2 flex items-start gap-2">
+                      <Icon name="AlertCircle" size={14} className="text-red-400 mt-0.5 shrink-0" />
+                      <p className="font-mono text-xs text-red-400">{genError}</p>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -490,35 +557,42 @@ export default function Index() {
               className="relative border border-[hsl(185,100%,50%,0.4)] overflow-hidden mx-auto animate-pulse-glow bg-[hsl(220,18%,9%)]"
               style={{ aspectRatio: ratio.replace(":", "/"), maxWidth: "480px" }}
             >
-              <img
-                src="https://cdn.poehali.dev/projects/f9d35422-02a0-4f48-b1e4-b2cda9b120ce/files/6118d778-de6b-4009-94bd-e54d93398927.jpg"
-                alt="result"
-                className="w-full h-full object-cover opacity-55"
-              />
-              <div className="absolute inset-0 grid-bg opacity-30" />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-16 h-16 bg-black/70 border border-[hsl(185,100%,50%)] flex items-center justify-center cursor-pointer hover:bg-[hsl(185,100%,50%,0.15)] transition-colors">
-                  <Icon name="Play" size={28} className="text-[hsl(185,100%,50%)]" />
-                </div>
-              </div>
-              <div className="absolute bottom-0 left-0 right-0 bg-black/80 px-3 py-2 flex items-center gap-2">
-                <Icon name="Play" size={12} className="text-[hsl(185,100%,50%)]" />
-                <div className="h-0.5 flex-1 bg-[hsl(185,100%,50%,0.3)]">
-                  <div className="h-full w-0 bg-[hsl(185,100%,50%)]" />
-                </div>
-                <span className="font-mono text-xs text-muted-foreground">{duration}</span>
-              </div>
+              {resultVideoSrc ? (
+                <video
+                  src={resultVideoSrc}
+                  controls
+                  autoPlay
+                  loop
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <>
+                  <img
+                    src={uploadedImages[0]}
+                    alt="result"
+                    className="w-full h-full object-cover opacity-55"
+                  />
+                  <div className="absolute inset-0 grid-bg opacity-30" />
+                </>
+              )}
             </div>
 
             <div className="flex gap-3 justify-center flex-wrap">
-              <a
-                href="https://cdn.poehali.dev/projects/f9d35422-02a0-4f48-b1e4-b2cda9b120ce/files/6118d778-de6b-4009-94bd-e54d93398927.jpg"
-                download={`vidai-${style}-${duration}.mp4`}
-                className="btn-primary px-6 py-3 text-sm tracking-widest flex items-center gap-2"
-              >
-                <Icon name="Download" size={14} />
-                СКАЧАТЬ ВИДЕО
-              </a>
+              {resultVideoSrc ? (
+                <a
+                  href={resultVideoSrc}
+                  download={`vidai-${style}-${duration}.mp4`}
+                  className="btn-primary px-6 py-3 text-sm tracking-widest flex items-center gap-2"
+                >
+                  <Icon name="Download" size={14} />
+                  СКАЧАТЬ ВИДЕО
+                </a>
+              ) : (
+                <button disabled className="btn-primary px-6 py-3 text-sm tracking-widest flex items-center gap-2 opacity-40 cursor-not-allowed">
+                  <Icon name="Download" size={14} />
+                  СКАЧАТЬ ВИДЕО
+                </button>
+              )}
               <button
                 onClick={handleReset}
                 className="px-6 py-3 border border-border font-mono text-sm tracking-widest text-muted-foreground hover:border-[hsl(185,100%,50%,0.4)] hover:text-foreground transition-all flex items-center gap-2"
