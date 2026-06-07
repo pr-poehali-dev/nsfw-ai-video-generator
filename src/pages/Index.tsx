@@ -511,10 +511,14 @@ export default function Index() {
             </div>
 
             <div className="flex gap-3 justify-center flex-wrap">
-              <button className="btn-primary px-6 py-3 text-sm tracking-widest flex items-center gap-2">
+              <a
+                href="https://cdn.poehali.dev/projects/f9d35422-02a0-4f48-b1e4-b2cda9b120ce/files/6118d778-de6b-4009-94bd-e54d93398927.jpg"
+                download={`vidai-${style}-${duration}.mp4`}
+                className="btn-primary px-6 py-3 text-sm tracking-widest flex items-center gap-2"
+              >
                 <Icon name="Download" size={14} />
                 СКАЧАТЬ ВИДЕО
-              </button>
+              </a>
               <button
                 onClick={handleReset}
                 className="px-6 py-3 border border-border font-mono text-sm tracking-widest text-muted-foreground hover:border-[hsl(185,100%,50%,0.4)] hover:text-foreground transition-all flex items-center gap-2"
